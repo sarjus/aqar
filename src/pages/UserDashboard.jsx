@@ -2,6 +2,18 @@ import { useState, useEffect } from 'react'
 import { Navbar } from '../components/Navbar'
 import { supabase } from '../lib/supabase'
 
+// Natural sort function for IDs like "1.1.1", "1.1.2", etc.
+const naturalSort = (a, b) => {
+  const aParts = a.split('.').map(Number)
+  const bParts = b.split('.').map(Number)
+  for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
+    const aPart = aParts[i] || 0
+    const bPart = bParts[i] || 0
+    if (aPart !== bPart) return aPart - bPart
+  }
+  return 0
+}
+
 // Transform database documents into the aqarData structure
 const transformDocumentsToAqarData = (documents) => {
   const criteriaMap = {}
@@ -42,14 +54,26 @@ const transformDocumentsToAqarData = (documents) => {
     })
   })
   
-  // Convert to array format
-  return Object.values(criteriaMap).map(criterion => ({
-    ...criterion,
-    sections: Object.values(criterion.sections).map(section => ({
-      ...section,
-      items: Object.values(section.items)
-    }))
-  }))
+  // Convert to array format with proper sorting
+  const criteria = Object.keys(criteriaMap).sort((a, b) => parseInt(a) - parseInt(b))
+  
+  return criteria.map(criterionId => {
+    const criterion = criteriaMap[criterionId]
+    const sectionIds = Object.keys(criterion.sections).sort(naturalSort)
+    
+    return {
+      ...criterion,
+      sections: sectionIds.map(sectionId => {
+        const section = criterion.sections[sectionId]
+        const itemIds = Object.keys(section.items).sort(naturalSort)
+        
+        return {
+          ...section,
+          items: itemIds.map(itemId => section.items[itemId])
+        }
+      })
+    }
+  })
 }
 
 // Fallback data in case database is not set up yet
@@ -212,23 +236,71 @@ export const UserDashboard = () => {
 
   useEffect(() => {
     fetchDocuments()
+    
+    // Set up real-time subscription for document updates
+    const subscription = supabase
+      .channel('aqar_documents_changes')
+      .on('postgres_changes', 
+        { event: '*', schema: 'public', table: 'aqar_documents' },
+        (payload) => {
+          console.log('Document change detected:', payload)
+          fetchDocuments() // Re-fetch documents when any change occurs
+        }
+      )
+      .subscribe()
+    
+    // Cleanup subscription on unmount
+    return () => {
+      subscription.unsubscribe()
+    }
   }, [])
 
   const fetchDocuments = async () => {
     try {
+      console.log('📥 UserDashboard: Fetching documents...')
       const { data, error } = await supabase
         .from('aqar_documents')
         .select('*')
-        .order('display_order', { ascending: true })
 
       if (error) throw error
       
-      if (data && data.length > 0) {
-        const transformedData = transformDocumentsToAqarData(data)
+      // Sort documents by criterion_id, section_id, then item_id
+      const sortedData = (data || []).sort((a, b) => {
+        // Compare criterion_id (e.g., "1" vs "2")
+        if (a.criterion_id !== b.criterion_id) {
+          return parseInt(a.criterion_id) - parseInt(b.criterion_id)
+        }
+        // Compare section_id (e.g., "1.1" vs "1.2")
+        if (a.section_id !== b.section_id) {
+          const aSectionParts = a.section_id.split('.').map(Number)
+          const bSectionParts = b.section_id.split('.').map(Number)
+          for (let i = 0; i < Math.max(aSectionParts.length, bSectionParts.length); i++) {
+            const aPart = aSectionParts[i] || 0
+            const bPart = bSectionParts[i] || 0
+            if (aPart !== bPart) return aPart - bPart
+          }
+        }
+        // Compare item_id (e.g., "1.1.1" vs "1.1.2")
+        const aItemParts = a.item_id.split('.').map(Number)
+        const bItemParts = b.item_id.split('.').map(Number)
+        for (let i = 0; i < Math.max(aItemParts.length, bItemParts.length); i++) {
+          const aPart = aItemParts[i] || 0
+          const bPart = bItemParts[i] || 0
+          if (aPart !== bPart) return aPart - bPart
+        }
+        return 0
+      })
+      
+      console.log('📊 UserDashboard: Fetched documents count:', sortedData?.length)
+      console.log('📊 UserDashboard: Sample data:', sortedData?.slice(0, 2))
+      
+      if (sortedData && sortedData.length > 0) {
+        const transformedData = transformDocumentsToAqarData(sortedData)
+        console.log('✨ UserDashboard: Transformed criteria count:', transformedData.length)
         setAqarData(transformedData)
       }
     } catch (error) {
-      console.error('Error fetching documents:', error)
+      console.error('❌ UserDashboard: Error fetching documents:', error)
       // Keep using fallback data if fetch fails
     } finally {
       setLoading(false)

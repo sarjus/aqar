@@ -39,40 +39,76 @@ export const AdminDashboard = () => {
 
   const fetchDocuments = async () => {
     try {
+      console.log('📥 Fetching documents...')
       const { data, error } = await supabase
         .from('aqar_documents')
         .select('*')
-        .order('display_order', { ascending: true })
 
       if (error) throw error
-      setDocuments(data || [])
+      
+      // Sort documents by criterion_id, section_id, then item_id
+      const sortedData = (data || []).sort((a, b) => {
+        // Compare criterion_id (e.g., "1" vs "2")
+        if (a.criterion_id !== b.criterion_id) {
+          return parseInt(a.criterion_id) - parseInt(b.criterion_id)
+        }
+        // Compare section_id (e.g., "1.1" vs "1.2")
+        if (a.section_id !== b.section_id) {
+          const aSectionParts = a.section_id.split('.').map(Number)
+          const bSectionParts = b.section_id.split('.').map(Number)
+          for (let i = 0; i < Math.max(aSectionParts.length, bSectionParts.length); i++) {
+            const aPart = aSectionParts[i] || 0
+            const bPart = bSectionParts[i] || 0
+            if (aPart !== bPart) return aPart - bPart
+          }
+        }
+        // Compare item_id (e.g., "1.1.1" vs "1.1.2")
+        const aItemParts = a.item_id.split('.').map(Number)
+        const bItemParts = b.item_id.split('.').map(Number)
+        for (let i = 0; i < Math.max(aItemParts.length, bItemParts.length); i++) {
+          const aPart = aItemParts[i] || 0
+          const bPart = bItemParts[i] || 0
+          if (aPart !== bPart) return aPart - bPart
+        }
+        return 0
+      })
+      
+      console.log('📊 Fetched documents count:', sortedData.length)
+      console.log('📊 Sample of fetched data:', sortedData.slice(0, 3))
+      setDocuments(sortedData)
     } catch (error) {
-      console.error('Error fetching documents:', error)
+      console.error('❌ Error fetching documents:', error)
     }
   }
 
   const handleUpdateDocument = async (docId, newUrl) => {
-    setLoading(true)
+    console.log('🔄 Updating document:', docId, 'New URL:', newUrl)
     setMessage({ type: '', text: '' })
 
     try {
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('aqar_documents')
         .update({ 
           document_url: newUrl,
           updated_at: new Date().toISOString()
         })
         .eq('id', docId)
+        .select()
 
-      if (error) throw error
+      if (error) {
+        console.error('❌ Update error:', error)
+        throw error
+      }
 
-      setMessage({ type: 'success', text: 'Document link updated successfully!' })
+      console.log('✅ Document updated:', data)
+
+      // Fetch updated documents first, then clear editing state
+      await fetchDocuments()
       setEditingDoc(null)
-      fetchDocuments()
+      setMessage({ type: 'success', text: 'Document link updated successfully!' })
     } catch (error) {
+      console.error('❌ Error in handleUpdateDocument:', error)
       setMessage({ type: 'error', text: error.message })
-    } finally {
-      setLoading(false)
     }
   }
 
@@ -91,9 +127,10 @@ export const AdminDashboard = () => {
 
       if (error) throw error
 
-      setMessage({ type: 'success', text: 'Document type updated successfully!' })
+      // Fetch updated documents first, then clear editing state
+      await fetchDocuments()
       setEditingType(null)
-      fetchDocuments()
+      setMessage({ type: 'success', text: 'Document type updated successfully!' })
     } catch (error) {
       setMessage({ type: 'error', text: error.message })
     } finally {
