@@ -36,8 +36,8 @@ export const Login = () => {
       <div className="max-w-md w-full">
         <div className="bg-white rounded-2xl shadow-lg border border-google-gray-200 p-8">
           <div className="text-center mb-8">
-            <h1 className="text-3xl font-medium text-google-gray-800 mb-2">AQAR Portal</h1>
-            <p className="text-google-gray-600 text-sm">Annual Quality Assurance Report</p>
+            <h1 className="text-3xl font-medium text-google-gray-800 mb-2">NAACTrack</h1>
+            <p className="text-google-gray-600 text-sm">One data portal for all your needs</p>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-5">
