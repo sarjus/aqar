@@ -2,6 +2,18 @@ import { useState, useEffect } from 'react'
 import { Navbar } from '../components/Navbar'
 import { supabase } from '../lib/supabase'
 
+// Natural sort function for IDs like "1.1.1", "1.1.2", etc.
+const naturalSort = (a, b) => {
+  const aParts = a.split('.').map(Number)
+  const bParts = b.split('.').map(Number)
+  for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
+    const aPart = aParts[i] || 0
+    const bPart = bParts[i] || 0
+    if (aPart !== bPart) return aPart - bPart
+  }
+  return 0
+}
+
 // Transform database documents into the aqarData structure
 const transformDocumentsToAqarData = (documents) => {
   const criteriaMap = {}
@@ -42,14 +54,26 @@ const transformDocumentsToAqarData = (documents) => {
     })
   })
   
-  // Convert to array format
-  return Object.values(criteriaMap).map(criterion => ({
-    ...criterion,
-    sections: Object.values(criterion.sections).map(section => ({
-      ...section,
-      items: Object.values(section.items)
-    }))
-  }))
+  // Convert to array format with proper sorting
+  const criteria = Object.keys(criteriaMap).sort((a, b) => parseInt(a) - parseInt(b))
+  
+  return criteria.map(criterionId => {
+    const criterion = criteriaMap[criterionId]
+    const sectionIds = Object.keys(criterion.sections).sort(naturalSort)
+    
+    return {
+      ...criterion,
+      sections: sectionIds.map(sectionId => {
+        const section = criterion.sections[sectionId]
+        const itemIds = Object.keys(section.items).sort(naturalSort)
+        
+        return {
+          ...section,
+          items: itemIds.map(itemId => section.items[itemId])
+        }
+      })
+    }
+  })
 }
 
 // Fallback data in case database is not set up yet
@@ -209,29 +233,124 @@ export const UserDashboard = () => {
   const [loading, setLoading] = useState(true)
   const [expandedCriteria, setExpandedCriteria] = useState(null)
   const [expandedSections, setExpandedSections] = useState({})
+  const [showResetModal, setShowResetModal] = useState(false)
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [resetLoading, setResetLoading] = useState(false)
+  const [resetMessage, setResetMessage] = useState({ type: '', text: '' })
+  const [showNewPwd, setShowNewPwd] = useState(false)
+  const [showConfirmPwd, setShowConfirmPwd] = useState(false)
 
   useEffect(() => {
     fetchDocuments()
+    
+    // Set up real-time subscription for document updates
+    const subscription = supabase
+      .channel('aqar_documents_changes')
+      .on('postgres_changes', 
+        { event: '*', schema: 'public', table: 'aqar_documents' },
+        (payload) => {
+          console.log('Document change detected:', payload)
+          fetchDocuments() // Re-fetch documents when any change occurs
+        }
+      )
+      .subscribe()
+    
+    // Cleanup subscription on unmount
+    return () => {
+      subscription.unsubscribe()
+    }
   }, [])
 
   const fetchDocuments = async () => {
     try {
+      console.log('📥 UserDashboard: Fetching documents...')
       const { data, error } = await supabase
         .from('aqar_documents')
         .select('*')
-        .order('display_order', { ascending: true })
 
       if (error) throw error
       
-      if (data && data.length > 0) {
-        const transformedData = transformDocumentsToAqarData(data)
+      // Sort documents by criterion_id, section_id, then item_id
+      const sortedData = (data || []).sort((a, b) => {
+        // Compare criterion_id (e.g., "1" vs "2")
+        if (a.criterion_id !== b.criterion_id) {
+          return parseInt(a.criterion_id) - parseInt(b.criterion_id)
+        }
+        // Compare section_id (e.g., "1.1" vs "1.2")
+        if (a.section_id !== b.section_id) {
+          const aSectionParts = a.section_id.split('.').map(Number)
+          const bSectionParts = b.section_id.split('.').map(Number)
+          for (let i = 0; i < Math.max(aSectionParts.length, bSectionParts.length); i++) {
+            const aPart = aSectionParts[i] || 0
+            const bPart = bSectionParts[i] || 0
+            if (aPart !== bPart) return aPart - bPart
+          }
+        }
+        // Compare item_id (e.g., "1.1.1" vs "1.1.2")
+        const aItemParts = a.item_id.split('.').map(Number)
+        const bItemParts = b.item_id.split('.').map(Number)
+        for (let i = 0; i < Math.max(aItemParts.length, bItemParts.length); i++) {
+          const aPart = aItemParts[i] || 0
+          const bPart = bItemParts[i] || 0
+          if (aPart !== bPart) return aPart - bPart
+        }
+        return 0
+      })
+      
+      console.log('📊 UserDashboard: Fetched documents count:', sortedData?.length)
+      console.log('📊 UserDashboard: Sample data:', sortedData?.slice(0, 2))
+      
+      if (sortedData && sortedData.length > 0) {
+        const transformedData = transformDocumentsToAqarData(sortedData)
+        console.log('✨ UserDashboard: Transformed criteria count:', transformedData.length)
         setAqarData(transformedData)
       }
     } catch (error) {
-      console.error('Error fetching documents:', error)
+      console.error('❌ UserDashboard: Error fetching documents:', error)
       // Keep using fallback data if fetch fails
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handlePasswordReset = async (e) => {
+    e?.preventDefault()
+    setResetMessage({ type: '', text: '' })
+
+    if (!newPassword || newPassword.length < 6) {
+      setResetMessage({ type: 'error', text: 'Password must be at least 6 characters.' })
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      setResetMessage({ type: 'error', text: 'Passwords do not match.' })
+      return
+    }
+
+    try {
+      setResetLoading(true)
+      const { error } = await supabase.auth.updateUser({ password: newPassword })
+      if (error) throw error
+      // Log password reset activity
+      try {
+        const { data: userData } = await supabase.auth.getUser()
+        const userEmail = userData?.user?.email || ''
+        if (userEmail) {
+          await supabase.from('activity_logs').insert([
+            { email: userEmail, activity: 'password_reset', occurred_at: new Date().toISOString() }
+          ])
+        }
+      } catch (_) {
+        // ignore logging errors
+      }
+      setResetMessage({ type: 'success', text: 'Password updated successfully.' })
+      setNewPassword('')
+      setConfirmPassword('')
+      setTimeout(() => setShowResetModal(false), 1200)
+    } catch (err) {
+      setResetMessage({ type: 'error', text: err.message || 'Failed to update password.' })
+    } finally {
+      setResetLoading(false)
     }
   }
 
@@ -268,9 +387,18 @@ export const UserDashboard = () => {
       <Navbar />
       
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="mb-8">
-          <h1 className="text-4xl font-medium text-google-gray-800 mb-2">AQAR</h1>
-          <p className="text-google-gray-600">Annual Quality Assurance Report</p>
+        <div className="mb-8 flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-4xl font-medium text-google-gray-800 mb-2">AQAR</h1>
+            <p className="text-google-gray-600">Annual Quality Assurance Report</p>
+          </div>
+          <button
+            onClick={() => { setShowResetModal(true); setResetMessage({ type: '', text: '' }) }}
+            className="btn-secondary flex items-center gap-2 h-11"
+          >
+            <span className="material-icons text-base">lock_reset</span>
+            <span>Reset Password</span>
+          </button>
         </div>
 
         <div className="space-y-3">
@@ -313,33 +441,11 @@ export const UserDashboard = () => {
                                       rel="noopener noreferrer"
                                       className="flex items-center space-x-3 p-3 bg-google-gray-50 hover:bg-google-blue-50 border border-google-gray-200 hover:border-google-blue-300 rounded-lg cursor-pointer transition-all group"
                                     >
-                                      <span className={`material-icons ${
-                                        doc.type === 'PDF' ? 'text-google-red-600' : 
-                                        doc.type === 'Excel' ? 'text-google-green-600' : 
-                                        doc.type === 'Word' ? 'text-google-blue-600' :
-                                        doc.type === 'PowerPoint' ? 'text-google-yellow-600' :
-                                        doc.type === 'Image' ? 'text-google-blue-600' :
-                                        doc.type === 'Video' ? 'text-google-red-600' :
-                                        'text-google-gray-600'
-                                      }`}>
-                                        {doc.type === 'PDF' ? 'picture_as_pdf' : 
-                                         doc.type === 'Excel' ? 'table_chart' : 
-                                         doc.type === 'Word' ? 'description' :
-                                         doc.type === 'PowerPoint' ? 'slideshow' :
-                                         doc.type === 'Image' ? 'image' :
-                                         doc.type === 'Video' ? 'videocam' :
-                                         'insert_drive_file'}
+                                      <span className="material-icons text-google-blue-600">
+                                        link
                                       </span>
                                       <span className="text-sm text-google-gray-800 flex-1 group-hover:text-google-blue-700 transition-colors">{doc.name}</span>
-                                      <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${
-                                        doc.type === 'PDF' ? 'bg-google-red-100 text-google-red-700' : 
-                                        doc.type === 'Excel' ? 'bg-google-green-100 text-google-green-700' : 
-                                        doc.type === 'Word' ? 'bg-google-blue-100 text-google-blue-700' :
-                                        doc.type === 'PowerPoint' ? 'bg-google-yellow-100 text-google-yellow-700' :
-                                        doc.type === 'Image' ? 'bg-google-blue-100 text-google-blue-700' :
-                                        doc.type === 'Video' ? 'bg-google-red-100 text-google-red-700' :
-                                        'bg-google-gray-100 text-google-gray-700'
-                                      }`}>
+                                      <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-google-blue-100 text-google-blue-700">
                                         {doc.type}
                                       </span>
                                       <span className="material-icons text-google-gray-400 group-hover:text-google-blue-600 text-sm">
@@ -361,6 +467,78 @@ export const UserDashboard = () => {
           ))}
         </div>
       </div>
+      {showResetModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+          <div className="bg-white rounded-xl shadow-lg w-full max-w-md border border-google-gray-200 p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-medium text-google-gray-800">Reset Password</h3>
+              <button onClick={() => setShowResetModal(false)} className="text-google-gray-400 hover:text-google-blue-600">
+                <span className="material-icons">close</span>
+              </button>
+            </div>
+
+            <form onSubmit={handlePasswordReset} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-google-gray-700 mb-2">New Password</label>
+                <div className="relative">
+                  <input
+                    type={showNewPwd ? 'text' : 'password'}
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    className="input-field pr-10"
+                    placeholder="Enter new password"
+                    minLength={6}
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPwd(!showNewPwd)}
+                    className="absolute inset-y-0 right-0 px-3 flex items-center text-google-gray-400 hover:text-google-blue-600"
+                    aria-label={showNewPwd ? 'Hide password' : 'Show password'}
+                  >
+                    <span className="material-icons text-base">{showNewPwd ? 'visibility_off' : 'visibility'}</span>
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-google-gray-700 mb-2">Confirm Password</label>
+                <div className="relative">
+                  <input
+                    type={showConfirmPwd ? 'text' : 'password'}
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    className="input-field pr-10"
+                    placeholder="Re-enter new password"
+                    minLength={6}
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmPwd(!showConfirmPwd)}
+                    className="absolute inset-y-0 right-0 px-3 flex items-center text-google-gray-400 hover:text-google-blue-600"
+                    aria-label={showConfirmPwd ? 'Hide password' : 'Show password'}
+                  >
+                    <span className="material-icons text-base">{showConfirmPwd ? 'visibility_off' : 'visibility'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {resetMessage.text && (
+                <div className={`${resetMessage.type === 'error' ? 'bg-google-red-50 border-google-red-200 text-google-red-700' : 'bg-google-green-50 border-google-green-200 text-google-green-700'} border px-4 py-3 rounded-lg text-sm`}>
+                  {resetMessage.text}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button type="button" onClick={() => setShowResetModal(false)} className="btn-secondary">Cancel</button>
+                <button type="submit" disabled={resetLoading} className="btn-primary">
+                  {resetLoading ? 'Updating...' : 'Update Password'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

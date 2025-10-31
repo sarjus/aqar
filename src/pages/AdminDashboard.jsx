@@ -1,14 +1,24 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
+import { useAuth } from '../contexts/AuthContext'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { supabaseAdmin, hasAdminAccess } from '../lib/supabaseAdmin'
 import { Navbar } from '../components/Navbar'
 
 export const AdminDashboard = () => {
+  const { signOut } = useAuth()
+  const navigate = useNavigate()
   const [users, setUsers] = useState([])
   const [documents, setDocuments] = useState([])
   const [loading, setLoading] = useState(false)
   const [showCreateForm, setShowCreateForm] = useState(false)
-  const [activeTab, setActiveTab] = useState('users') // 'users' or 'documents'
+  const [showCreatePassword, setShowCreatePassword] = useState(false)
+  const [activeTab, setActiveTab] = useState('users') // 'users' | 'documents' | 'logs'
+  
+  const [logs, setLogs] = useState([])
+  const [logsSort, setLogsSort] = useState('desc') // 'asc' | 'desc'
+  const [logsEmailFilter, setLogsEmailFilter] = useState('')
+  const [logsDateFilter, setLogsDateFilter] = useState('') // yyyy-mm-dd
   const [editingDoc, setEditingDoc] = useState(null)
   const [editingType, setEditingType] = useState(null)
   const [formData, setFormData] = useState({
@@ -18,10 +28,22 @@ export const AdminDashboard = () => {
   })
   const [message, setMessage] = useState({ type: '', text: '' })
 
+  const location = useLocation()
+
   useEffect(() => {
     fetchUsers()
     fetchDocuments()
+    fetchLogs('desc')
   }, [])
+
+  // Listen for tab changes via query param from navbar (e.g., /admin?tab=documents)
+  useEffect(() => {
+    const params = new URLSearchParams(location.search)
+    const tabParam = params.get('tab')
+    if (tabParam && ['users','documents','logs'].includes(tabParam)) {
+      setActiveTab(tabParam)
+    }
+  }, [location.search])
 
   const fetchUsers = async () => {
     try {
@@ -37,42 +59,111 @@ export const AdminDashboard = () => {
     }
   }
 
+  const handleSignOut = async () => {
+    await signOut()
+    navigate('/login')
+  }
+
   const fetchDocuments = async () => {
     try {
+      console.log('📥 Fetching documents...')
       const { data, error } = await supabase
         .from('aqar_documents')
         .select('*')
-        .order('display_order', { ascending: true })
 
       if (error) throw error
-      setDocuments(data || [])
+      
+      // Sort documents by criterion_id, section_id, then item_id
+      const sortedData = (data || []).sort((a, b) => {
+        // Compare criterion_id (e.g., "1" vs "2")
+        if (a.criterion_id !== b.criterion_id) {
+          return parseInt(a.criterion_id) - parseInt(b.criterion_id)
+        }
+        // Compare section_id (e.g., "1.1" vs "1.2")
+        if (a.section_id !== b.section_id) {
+          const aSectionParts = a.section_id.split('.').map(Number)
+          const bSectionParts = b.section_id.split('.').map(Number)
+          for (let i = 0; i < Math.max(aSectionParts.length, bSectionParts.length); i++) {
+            const aPart = aSectionParts[i] || 0
+            const bPart = bSectionParts[i] || 0
+            if (aPart !== bPart) return aPart - bPart
+          }
+        }
+        // Compare item_id (e.g., "1.1.1" vs "1.1.2")
+        const aItemParts = a.item_id.split('.').map(Number)
+        const bItemParts = b.item_id.split('.').map(Number)
+        for (let i = 0; i < Math.max(aItemParts.length, bItemParts.length); i++) {
+          const aPart = aItemParts[i] || 0
+          const bPart = bItemParts[i] || 0
+          if (aPart !== bPart) return aPart - bPart
+        }
+        return 0
+      })
+      
+      console.log('📊 Fetched documents count:', sortedData.length)
+      console.log('📊 Sample of fetched data:', sortedData.slice(0, 3))
+      setDocuments(sortedData)
     } catch (error) {
-      console.error('Error fetching documents:', error)
+      console.error('❌ Error fetching documents:', error)
+    }
+  }
+
+  const fetchLogs = async (order = logsSort, email = logsEmailFilter, dateStr = logsDateFilter) => {
+    try {
+      let query = supabase
+        .from('activity_logs')
+        .select('*')
+        .order('occurred_at', { ascending: order === 'asc' })
+
+      if (email && email.trim().length > 0) {
+        query = query.ilike('email', `%${email.trim()}%`)
+      }
+
+      if (dateStr) {
+        const start = new Date(dateStr)
+        start.setHours(0, 0, 0, 0)
+        const end = new Date(start)
+        end.setDate(end.getDate() + 1)
+        query = query.gte('occurred_at', start.toISOString()).lt('occurred_at', end.toISOString())
+      }
+
+      const { data, error } = await query
+
+      if (error) throw error
+      setLogs(data || [])
+    } catch (error) {
+      console.error('❌ Error fetching activity logs:', error)
     }
   }
 
   const handleUpdateDocument = async (docId, newUrl) => {
-    setLoading(true)
+    console.log('🔄 Updating document:', docId, 'New URL:', newUrl)
     setMessage({ type: '', text: '' })
 
     try {
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('aqar_documents')
         .update({ 
           document_url: newUrl,
           updated_at: new Date().toISOString()
         })
         .eq('id', docId)
+        .select()
 
-      if (error) throw error
+      if (error) {
+        console.error('❌ Update error:', error)
+        throw error
+      }
 
-      setMessage({ type: 'success', text: 'Document link updated successfully!' })
+      console.log('✅ Document updated:', data)
+
+      // Fetch updated documents first, then clear editing state
+      await fetchDocuments()
       setEditingDoc(null)
-      fetchDocuments()
+      setMessage({ type: 'success', text: 'Document link updated successfully!' })
     } catch (error) {
+      console.error('❌ Error in handleUpdateDocument:', error)
       setMessage({ type: 'error', text: error.message })
-    } finally {
-      setLoading(false)
     }
   }
 
@@ -91,9 +182,10 @@ export const AdminDashboard = () => {
 
       if (error) throw error
 
-      setMessage({ type: 'success', text: 'Document type updated successfully!' })
+      // Fetch updated documents first, then clear editing state
+      await fetchDocuments()
       setEditingType(null)
-      fetchDocuments()
+      setMessage({ type: 'success', text: 'Document type updated successfully!' })
     } catch (error) {
       setMessage({ type: 'error', text: error.message })
     } finally {
@@ -188,34 +280,50 @@ export const AdminDashboard = () => {
         </div>
 
         {/* Tab Navigation */}
-        <div className="mb-6 border-b border-google-gray-200">
-          <div className="flex space-x-8">
-            <button
-              onClick={() => setActiveTab('users')}
-              className={`pb-4 px-1 border-b-2 font-medium text-sm transition-colors ${
-                activeTab === 'users'
-                  ? 'border-google-blue-500 text-google-blue-600'
-                  : 'border-transparent text-google-gray-600 hover:text-google-gray-800 hover:border-google-gray-300'
-              }`}
-            >
-              <div className="flex items-center space-x-2">
-                <span className="material-icons text-sm">people</span>
-                <span>User Management</span>
-              </div>
-            </button>
-            <button
-              onClick={() => setActiveTab('documents')}
-              className={`pb-4 px-1 border-b-2 font-medium text-sm transition-colors ${
-                activeTab === 'documents'
-                  ? 'border-google-blue-500 text-google-blue-600'
-                  : 'border-transparent text-google-gray-600 hover:text-google-gray-800 hover:border-google-gray-300'
-              }`}
-            >
-              <div className="flex items-center space-x-2">
-                <span className="material-icons text-sm">link</span>
-                <span>Document Links</span>
-              </div>
-            </button>
+        <div className="mb-6">
+          {/* Desktop: horizontal tabs */}
+          <div className="hidden md:block border-b border-google-gray-200">
+            <div className="flex space-x-8">
+              <button
+                onClick={() => setActiveTab('users')}
+                className={`pb-4 px-1 border-b-2 font-medium text-sm transition-colors ${
+                  activeTab === 'users'
+                    ? 'border-google-blue-500 text-google-blue-600'
+                    : 'border-transparent text-google-gray-600 hover:text-google-gray-800 hover:border-google-gray-300'
+                }`}
+              >
+                <div className="flex items-center space-x-2">
+                  <span className="material-icons text-sm">people</span>
+                  <span>User Management</span>
+                </div>
+              </button>
+              <button
+                onClick={() => setActiveTab('documents')}
+                className={`pb-4 px-1 border-b-2 font-medium text-sm transition-colors ${
+                  activeTab === 'documents'
+                    ? 'border-google-blue-500 text-google-blue-600'
+                    : 'border-transparent text-google-gray-600 hover:text-google-gray-800 hover:border-google-gray-300'
+                }`}
+              >
+                <div className="flex items-center space-x-2">
+                  <span className="material-icons text-sm">link</span>
+                  <span>Document Links</span>
+                </div>
+              </button>
+              <button
+                onClick={() => setActiveTab('logs')}
+                className={`pb-4 px-1 border-b-2 font-medium text-sm transition-colors ${
+                  activeTab === 'logs'
+                    ? 'border-google-blue-500 text-google-blue-600'
+                    : 'border-transparent text-google-gray-600 hover:text-google-gray-800 hover:border-google-gray-300'
+                }`}
+              >
+                <div className="flex items-center space-x-2">
+                  <span className="material-icons text-sm">history</span>
+                  <span>Activity Logs</span>
+                </div>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -270,15 +378,25 @@ export const AdminDashboard = () => {
                 <label className="block text-sm font-medium text-google-gray-700 mb-2">
                   Password
                 </label>
-                <input
-                  type="password"
-                  value={formData.password}
-                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                  className="input-field"
-                  placeholder="Enter secure password"
-                  required
-                  minLength={6}
-                />
+                <div className="relative">
+                  <input
+                    type={showCreatePassword ? 'text' : 'password'}
+                    value={formData.password}
+                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                    className="input-field pr-10"
+                    placeholder="Enter secure password"
+                    required
+                    minLength={6}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowCreatePassword(!showCreatePassword)}
+                    className="absolute inset-y-0 right-0 px-3 flex items-center text-google-gray-400 hover:text-google-blue-600"
+                    aria-label={showCreatePassword ? 'Hide password' : 'Show password'}
+                  >
+                    <span className="material-icons text-base">{showCreatePassword ? 'visibility_off' : 'visibility'}</span>
+                  </button>
+                </div>
                 <p className="text-xs text-google-gray-500 mt-1.5 flex items-center">
                   <span className="material-icons text-xs mr-1">info</span>
                   Minimum 6 characters required
@@ -408,22 +526,8 @@ export const AdminDashboard = () => {
                       <tr key={doc.id} className="hover:bg-google-gray-50 transition-colors">
                         <td className="px-6 py-4">
                           <div className="flex items-center space-x-2">
-                            <span className={`material-icons text-sm ${
-                              doc.document_type === 'PDF' ? 'text-google-red-600' : 
-                              doc.document_type === 'Excel' ? 'text-google-green-600' :
-                              doc.document_type === 'Word' ? 'text-google-blue-600' :
-                              doc.document_type === 'PowerPoint' ? 'text-google-yellow-600' :
-                              doc.document_type === 'Image' ? 'text-google-blue-600' :
-                              doc.document_type === 'Video' ? 'text-google-red-600' :
-                              'text-google-gray-600'
-                            }`}>
-                              {doc.document_type === 'PDF' ? 'picture_as_pdf' : 
-                               doc.document_type === 'Excel' ? 'table_chart' :
-                               doc.document_type === 'Word' ? 'description' :
-                               doc.document_type === 'PowerPoint' ? 'slideshow' :
-                               doc.document_type === 'Image' ? 'image' :
-                               doc.document_type === 'Video' ? 'videocam' :
-                               'insert_drive_file'}
+                            <span className="material-icons text-sm text-google-blue-600">
+                              link
                             </span>
                             <span className="text-sm font-medium text-google-gray-900">{doc.document_name}</span>
                           </div>
@@ -453,13 +557,7 @@ export const AdminDashboard = () => {
                             </select>
                           ) : (
                             <div className="flex items-center space-x-2">
-                              <span className={`px-2.5 py-1 text-xs font-medium rounded-full ${
-                                doc.document_type === 'PDF' ? 'bg-google-red-100 text-google-red-700' : 
-                                doc.document_type === 'Excel' ? 'bg-google-green-100 text-google-green-700' :
-                                doc.document_type === 'Word' ? 'bg-google-blue-100 text-google-blue-700' :
-                                doc.document_type === 'PowerPoint' ? 'bg-google-yellow-100 text-google-yellow-700' :
-                                'bg-google-gray-100 text-google-gray-700'
-                              }`}>
+                              <span className="px-2.5 py-1 text-xs font-medium rounded-full bg-google-blue-100 text-google-blue-700">
                                 {doc.document_type}
                               </span>
                               <button
@@ -525,6 +623,89 @@ export const AdminDashboard = () => {
                   <div className="text-center py-12">
                     <span className="material-icons text-google-gray-400 text-5xl mb-3">link_off</span>
                     <p className="text-google-gray-500">No documents found. Run the setup SQL script first.</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Activity Logs Tab */}
+        {activeTab === 'logs' && (
+          <div>
+            <div className="mb-4">
+              <h2 className="text-xl font-medium text-google-gray-800 mb-1">Activity Logs</h2>
+              <p className="text-sm text-google-gray-600">Track user logins with timestamps</p>
+            </div>
+            <div className="card mb-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-google-gray-600 mb-1">Filter by email</label>
+                  <input
+                    type="text"
+                    value={logsEmailFilter}
+                    onChange={(e) => setLogsEmailFilter(e.target.value)}
+                    onBlur={() => fetchLogs(logsSort)}
+                    className="input-field py-2 px-3 text-sm w-full"
+                    placeholder="user@example.com"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-google-gray-600 mb-1">Filter by date</label>
+                  <input
+                    type="date"
+                    value={logsDateFilter}
+                    onChange={(e) => { setLogsDateFilter(e.target.value); fetchLogs(logsSort, logsEmailFilter, e.target.value) }}
+                    className="input-field py-2 px-3 text-sm w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-google-gray-600 mb-1">Sort by time</label>
+                  <select
+                    value={logsSort}
+                    onChange={(e) => { setLogsSort(e.target.value); fetchLogs(e.target.value) }}
+                    className="input-field py-2 px-3 text-sm w-full"
+                  >
+                    <option value="desc">Newest first</option>
+                    <option value="asc">Oldest first</option>
+                  </select>
+                </div>
+                <div className="flex items-end">
+                  <button
+                    type="button"
+                    onClick={() => { setLogsEmailFilter(''); setLogsDateFilter(''); fetchLogs(logsSort, '', '') }}
+                    className="btn-secondary w-full"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="card">
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-google-gray-200 text-sm md:text-base">
+                  <thead className="bg-google-gray-50">
+                    <tr>
+                      <th className="px-3 md:px-6 py-2 md:py-3 text-left text-xs font-medium text-google-gray-600 uppercase tracking-wider">Email</th>
+                      <th className="px-3 md:px-6 py-2 md:py-3 text-left text-xs font-medium text-google-gray-600 uppercase tracking-wider">Activity</th>
+                      <th className="px-3 md:px-6 py-2 md:py-3 text-left text-xs font-medium text-google-gray-600 uppercase tracking-wider">Timestamp</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-google-gray-200">
+                    {logs.map((log) => (
+                      <tr key={log.id} className="hover:bg-google-gray-50 transition-colors">
+                        <td className="px-3 md:px-6 py-3 whitespace-nowrap text-google-gray-800">{log.email}</td>
+                        <td className="px-3 md:px-6 py-3 whitespace-nowrap text-google-gray-800">{log.activity}</td>
+                        <td className="px-3 md:px-6 py-3 whitespace-nowrap text-google-gray-600">{new Date(log.occurred_at || log.login_at).toLocaleString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {logs.length === 0 && (
+                  <div className="text-center py-12">
+                    <span className="material-icons text-google-gray-400 text-5xl mb-3">history_toggle_off</span>
+                    <p className="text-google-gray-500">No activity yet.</p>
                   </div>
                 )}
               </div>
