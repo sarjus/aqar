@@ -21,10 +21,12 @@ export const AdminDashboard = () => {
   const [logsDateFilter, setLogsDateFilter] = useState('') // yyyy-mm-dd
   const [editingDoc, setEditingDoc] = useState(null)
   const [editingType, setEditingType] = useState(null)
+  const [editingCategory, setEditingCategory] = useState(null)
   const [formData, setFormData] = useState({
     email: '',
     password: '',
-    role: 'user'
+    role: 'user',
+    category: 'c-head'
   })
   const [message, setMessage] = useState({ type: '', text: '' })
 
@@ -193,6 +195,31 @@ export const AdminDashboard = () => {
     }
   }
 
+  const handleUpdateCategory = async (userId, newCategory) => {
+    setLoading(true)
+    setMessage({ type: '', text: '' })
+
+    try {
+      const { error } = await supabase
+        .from('user_roles')
+        .update({ 
+          category: newCategory
+        })
+        .eq('user_id', userId)
+
+      if (error) throw error
+
+      // Fetch updated users first, then clear editing state
+      await fetchUsers()
+      setEditingCategory(null)
+      setMessage({ type: 'success', text: 'User category updated successfully!' })
+    } catch (error) {
+      setMessage({ type: 'error', text: error.message })
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const handleCreateUser = async (e) => {
     e.preventDefault()
     setLoading(true)
@@ -222,14 +249,15 @@ export const AdminDashboard = () => {
           {
             user_id: authData.user.id,
             email: formData.email,
-            role: formData.role
+            role: formData.role,
+            category: formData.category
           }
         ])
 
       if (roleError) throw roleError
 
       setMessage({ type: 'success', text: 'User created successfully!' })
-      setFormData({ email: '', password: '', role: 'user' })
+      setFormData({ email: '', password: '', role: 'user', category: 'c-head' })
       setShowCreateForm(false)
       fetchUsers()
     } catch (error) {
@@ -417,6 +445,20 @@ export const AdminDashboard = () => {
                 </select>
               </div>
 
+              <div>
+                <label className="block text-sm font-medium text-google-gray-700 mb-2">
+                  Category
+                </label>
+                <select
+                  value={formData.category}
+                  onChange={(e) => setFormData({ ...formData, category: e.target.value })}
+                  className="input-field"
+                >
+                  <option value="c-head">C-Head</option>
+                  <option value="c-sub-head">C-Sub-Head</option>
+                </select>
+              </div>
+
               <button type="submit" disabled={loading} className="btn-primary flex items-center space-x-2">
                 <span className="material-icons text-sm">person_add</span>
                 <span>{loading ? 'Creating User...' : 'Create User'}</span>
@@ -436,6 +478,9 @@ export const AdminDashboard = () => {
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-google-gray-600 uppercase tracking-wider">
                     Role
+                  </th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-google-gray-600 uppercase tracking-wider">
+                    Category
                   </th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-google-gray-600 uppercase tracking-wider">
                     Created At
@@ -459,6 +504,37 @@ export const AdminDashboard = () => {
                       }`}>
                         {user.role}
                       </span>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      {editingCategory === user.user_id ? (
+                        <select
+                          defaultValue={user.category || 'c-head'}
+                          onChange={(e) => handleUpdateCategory(user.user_id, e.target.value)}
+                          onBlur={() => setEditingCategory(null)}
+                          className="input-field text-sm py-1 px-2"
+                          autoFocus
+                        >
+                          <option value="c-head">C-Head</option>
+                          <option value="c-sub-head">C-Sub-Head</option>
+                        </select>
+                      ) : (
+                        <div className="flex items-center space-x-2">
+                          <span className={`px-3 py-1 inline-flex text-xs font-medium rounded-full ${
+                            user.category === 'c-head' 
+                              ? 'bg-purple-100 text-purple-700' 
+                              : 'bg-orange-100 text-orange-700'
+                          }`}>
+                            {user.category || 'N/A'}
+                          </span>
+                          <button
+                            onClick={() => setEditingCategory(user.user_id)}
+                            className="text-google-gray-400 hover:text-google-blue-600"
+                            title="Edit category"
+                          >
+                            <span className="material-icons text-xs">edit</span>
+                          </button>
+                        </div>
+                      )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-google-gray-600">
                       {new Date(user.created_at).toLocaleDateString('en-US', {
